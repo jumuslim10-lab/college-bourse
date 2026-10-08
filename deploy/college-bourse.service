@@ -1,0 +1,19 @@
+[Unit]
+Description=Birzha kolledzha — Telegram-bot
+Documentation=https://github.com/jumuslim10-lab/college-bourse
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=college
+Group=college
+WorkingDirectory=/opt/college-bourse
+EnvironmentFile=/opt/college-bourse/.env
+ExecStart=/opt/college-bourse/.venv/bin/python /opt/college-bourse/run.py
+Restart=always
+RestartSec=5
+# Логи смотреть так: journalctl -u college-bourse -f
+
+[Install]
+WantedBy=multi-user.target
