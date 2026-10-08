@@ -60,6 +60,30 @@ Copy-Item .env.example .env
 `run.py` запущенным локально; когда бот понадобится 24/7, перенеси папку на дешёвый VPS
 и заведи systemd-юнит (`ExecStart=/opt/college-bourse/.venv/bin/python /opt/college-bourse/run.py`).
 
+## База данных: SQLite или Supabase
+
+По умолчанию бот пишет всё в файл `data/bot.db` — работает без интернета, настраивать нечего.
+
+Чтобы данные жили в облаке (Supabase, Postgres):
+
+1. Создай проект на supabase.com — регион выбирай ближайший к Кыргызстану (Mumbai или Singapore,
+   если их нет — Frankfurt). Регион потом не меняется без пересоздания проекта.
+2. Project Settings → Database → Connection string → **Session pooler** → скопируй URI.
+3. В `.env`: `DB_BACKEND=postgres` и `DATABASE_URL=postgresql://...`
+4. Запусти бота — таблицы создадутся сами. В логе будет `База: Postgres: ...`.
+
+Обратно на SQLite — вернуть `DB_BACKEND=sqlite`; файл `data/bot.db` никуда не девается.
+
+Прогон **всех тестов на облачной базе** (каждый тест — в своей схеме, прод не трогает):
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql://postgres:...@...pooler.supabase.com:5432/postgres"
+.venv\Scripts\python.exe -m pytest -q
+```
+
+Важно: **Supabase — это только база, бота он не запускает.** Бот по-прежнему живёт на твоём ПК или
+на VPS. И фото в Supabase не нужны: в объявлениях лежат Telegram `file_id`.
+
 ## Площадки (несколько колледжей в одном боте)
 
 1. `/admin` → 🏫 Площадки → ➕ Создать площадку: код (`college-01`), название, город.

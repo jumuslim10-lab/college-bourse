@@ -1,16 +1,15 @@
-"""Слой доступа к данным: подключение к SQLite и репозитории."""
+"""Слой доступа к данным: все SQL проекта. Драйвер (SQLite или Postgres) — в bot/storage.py."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
 from bot.categories import CATEGORIES
 from bot.config import BASE_DIR
+from bot.storage import Backend, SqliteBackend
 from bot.validation import normalize
 
 
@@ -52,83 +51,79 @@ CARD_COLUMNS = """
 
 
 class Database:
-    def __init__(self, path: Path | str, schema_path: Path | None = None) -> None:
-        self.path = Path(path)
-        self.schema_path = schema_path or BASE_DIR / "schema.sql"
-        self._conn: aiosqlite.Connection | None = None
+    """Репозиторий проекта: все SQL живут здесь, драйвер подставляется снаружи.
 
-    @property
-    def conn(self) -> aiosqlite.Connection:
-        if self._conn is None:
-            raise RuntimeError("База не подключена: сначала вызови Database.connect()")
-        return self._conn
+    По умолчанию это SQLite — файл рядом с ботом, работает без интернета.
+    `create_backend(config)` вернёт Postgres, если в `.env` стоит `DB_BACKEND=postgres`.
+    """
+
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        schema_path: Path | None = None,
+        backend: Backend | None = None,
+    ) -> None:
+        if backend is None:
+            backend = SqliteBackend(path or BASE_DIR / "data" / "bot.db", schema_path)
+        self.backend: Backend = backend
+
+    def describe(self) -> str:
+        return self.backend.describe()
 
     async def connect(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self.path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA foreign_keys = ON")
-        await self._conn.executescript(self.schema_path.read_text(encoding="utf-8"))
-        await self._conn.commit()
+        await self.backend.connect()
         await self.migrate()
         await self.seed_categories()
 
     async def migrate(self) -> None:
-        """Догоняющие миграции для баз, созданных более ранними версиями."""
+        """Догоняющие миграции для баз, созданных более ранними версиями.
+
+        Работает в обеих СУБД: список колонок берётся у драйвера (PRAGMA в SQLite,
+        information_schema в Postgres), дальше обычный ALTER TABLE.
+        """
         # Миграция 1: search_text
-        async with self.conn.execute("PRAGMA table_info(listings)") as cursor:
-            columns = {row["name"] for row in await cursor.fetchall()}
+        columns = await self.backend.column_names("listings")
         if "search_text" not in columns:
-            await self.conn.execute(
+            await self.backend.execute(
                 "ALTER TABLE listings ADD COLUMN search_text TEXT NOT NULL DEFAULT ''"
             )
             rows = await self._fetchall("SELECT id, title, description FROM listings")
             for row in rows:
-                await self.conn.execute(
+                await self.backend.execute(
                     "UPDATE listings SET search_text = ? WHERE id = ?",
                     (search_key(row["title"], row["description"]), row["id"]),
                 )
-            await self.conn.commit()
 
         # Миграция 2: community_id в users
-        async with self.conn.execute("PRAGMA table_info(users)") as cursor:
-            user_columns = {row["name"] for row in await cursor.fetchall()}
+        user_columns = await self.backend.column_names("users")
         if "community_id" not in user_columns:
-            await self.conn.execute(
-                "ALTER TABLE users ADD COLUMN community_id INTEGER REFERENCES communities(id)"
+            await self.backend.execute(
+                "ALTER TABLE users ADD COLUMN community_id BIGINT REFERENCES communities(id)"
             )
-            await self.conn.commit()
 
         # Миграция 3: community_id в listings
-        async with self.conn.execute("PRAGMA table_info(listings)") as cursor:
-            listing_columns = {row["name"] for row in await cursor.fetchall()}
+        listing_columns = await self.backend.column_names("listings")
         if "community_id" not in listing_columns:
-            await self.conn.execute(
-                "ALTER TABLE listings ADD COLUMN community_id INTEGER REFERENCES communities(id)"
+            await self.backend.execute(
+                "ALTER TABLE listings ADD COLUMN community_id BIGINT REFERENCES communities(id)"
             )
-            await self.conn.commit()
 
         # Миграция 4: пересобрать индекс раздела с учётом площадки. CREATE INDEX IF NOT EXISTS
         # не обновляет определение уже существующего индекса, поэтому проверяем руками.
-        index_row = await self._fetchone(
-            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_listings_cat'"
-        )
-        if index_row is not None and "community_id" not in (index_row["sql"] or ""):
-            await self.conn.execute("DROP INDEX IF EXISTS idx_listings_cat")
-            await self.conn.execute(
+        index_sql = await self.backend.index_sql("idx_listings_cat")
+        if index_sql is not None and "community_id" not in index_sql:
+            await self.backend.execute("DROP INDEX IF EXISTS idx_listings_cat")
+            await self.backend.execute(
                 "CREATE INDEX IF NOT EXISTS idx_listings_cat"
                 " ON listings(status, category_code, community_id, created_at DESC)"
             )
-            await self.conn.commit()
 
     async def close(self) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
+        await self.backend.close()
 
     async def seed_categories(self) -> None:
         for category in CATEGORIES:
-            await self.conn.execute(
+            await self.backend.execute(
                 """
                 INSERT INTO categories(code, title, emoji, ttl_days, sort, is_food)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -148,28 +143,30 @@ class Database:
                     int(category.is_food),
                 ),
             )
-        await self.conn.commit()
 
     # --- служебное ---------------------------------------------------------
-    async def _execute(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Cursor:
-        cursor = await self.conn.execute(sql, params)
-        await self.conn.commit()
-        return cursor
+    async def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """Выполняет запрос, возвращает число затронутых строк."""
+        return await self.backend.execute(sql, params)
 
-    async def _fetchone(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Row | None:
-        async with self.conn.execute(sql, params) as cursor:
-            return await cursor.fetchone()
+    async def _fetchone(self, sql: str, params: Sequence[Any] = ()) -> Mapping[str, Any] | None:
+        return await self.backend.fetchone(sql, params)
 
-    async def _fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[aiosqlite.Row]:
-        async with self.conn.execute(sql, params) as cursor:
-            return list(await cursor.fetchall())
+    async def _fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[Mapping[str, Any]]:
+        return await self.backend.fetchall(sql, params)
+
+    async def _insert_id(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """INSERT с `RETURNING id` — работает и в SQLite 3.35+, и в Postgres."""
+        return await self.backend.insert_id(sql, params)
 
     async def _scalar(self, sql: str, params: Sequence[Any] = ()) -> Any:
         row = await self._fetchone(sql, params)
         return None if row is None else row[0]
 
     # --- пользователи ------------------------------------------------------
-    async def upsert_user(self, tg_id: int, username: str | None, first_name: str | None) -> aiosqlite.Row:
+    async def upsert_user(
+        self, tg_id: int, username: str | None, first_name: str | None
+    ) -> Mapping[str, Any]:
         timestamp = now_iso()
         await self._execute(
             """
@@ -186,13 +183,13 @@ class Database:
         assert user is not None
         return user
 
-    async def get_user_by_tg(self, tg_id: int) -> aiosqlite.Row | None:
+    async def get_user_by_tg(self, tg_id: int) -> Mapping[str, Any] | None:
         return await self._fetchone("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
 
-    async def get_user(self, user_id: int) -> aiosqlite.Row | None:
+    async def get_user(self, user_id: int) -> Mapping[str, Any] | None:
         return await self._fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
 
-    async def find_user(self, raw: str) -> aiosqlite.Row | None:
+    async def find_user(self, raw: str) -> Mapping[str, Any] | None:
         value = (raw or "").strip().lstrip("@")
         if not value:
             return None
@@ -247,12 +244,13 @@ class Database:
         status: str,
         reject_reason: str | None = None,
     ) -> int:
-        cursor = await self._execute(
+        return await self._insert_id(
             """
             INSERT INTO listings(
                 author_id, community_id, kind, category_code, title, description, search_text, price,
                 is_negotiable, photo_file_id, status, created_at, reject_reason
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
             """,
             (
                 author_id,
@@ -270,9 +268,8 @@ class Database:
                 reject_reason,
             ),
         )
-        return int(cursor.lastrowid or 0)
 
-    async def get_listing(self, listing_id: int) -> aiosqlite.Row | None:
+    async def get_listing(self, listing_id: int) -> Mapping[str, Any] | None:
         return await self._fetchone(
             f"SELECT {CARD_COLUMNS} FROM listings l JOIN users u ON u.id = l.author_id WHERE l.id = ?",
             (listing_id,),
@@ -280,7 +277,7 @@ class Database:
 
     async def list_user_listings(
         self, user_id: int, statuses: Iterable[str] = ("active",)
-    ) -> list[aiosqlite.Row]:
+    ) -> list[Mapping[str, Any]]:
         statuses = tuple(statuses)
         placeholders = ",".join("?" for _ in statuses)
         return await self._fetchall(
@@ -317,7 +314,7 @@ class Database:
         limit: int,
         offset: int = 0,
         community_id: int | None = None,
-    ) -> list[aiosqlite.Row]:
+    ) -> list[Mapping[str, Any]]:
         """community_id=None — показываем объявления всех площадок (режим одной площадки)."""
         return await self._fetchall(
             f"""
@@ -371,7 +368,7 @@ class Database:
 
     async def search_active(
         self, query: str, limit: int = 10, community_id: int | None = None
-    ) -> list[aiosqlite.Row]:
+    ) -> list[Mapping[str, Any]]:
         key = normalize(query).lower()
         if not key:
             return []
@@ -411,16 +408,15 @@ class Database:
         await self._execute("UPDATE listings SET bumped_until = ? WHERE id = ?", (until_iso, listing_id))
 
     async def archive_expired(self) -> int:
-        cursor = await self._execute(
+        return await self._execute(
             """
             UPDATE listings SET status = 'archived'
             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
             """,
             (now_iso(),),
         )
-        return int(cursor.rowcount or 0)
 
-    async def list_pending(self, limit: int = 20) -> list[aiosqlite.Row]:
+    async def list_pending(self, limit: int = 20) -> list[Mapping[str, Any]]:
         return await self._fetchall(
             f"""
             SELECT {CARD_COLUMNS}
@@ -436,8 +432,9 @@ class Database:
     async def create_deal(self, listing_id: int, buyer_id: int, seller_id: int) -> int:
         await self._execute(
             """
-            INSERT OR IGNORE INTO deals(listing_id, buyer_id, seller_id, status, created_at)
+            INSERT INTO deals(listing_id, buyer_id, seller_id, status, created_at)
             VALUES (?, ?, ?, 'agreed', ?)
+            ON CONFLICT DO NOTHING
             """,
             (listing_id, buyer_id, seller_id, now_iso()),
         )
@@ -446,7 +443,7 @@ class Database:
         )
         return int(row["id"]) if row else 0
 
-    async def get_deal(self, deal_id: int) -> aiosqlite.Row | None:
+    async def get_deal(self, deal_id: int) -> Mapping[str, Any] | None:
         return await self._fetchone("SELECT * FROM deals WHERE id = ?", (deal_id,))
 
     async def set_deal_status(self, deal_id: int, status: str) -> None:
@@ -465,19 +462,21 @@ class Database:
     async def create_review(
         self, deal_id: int, rater_id: int, target_id: int, rating: int, text: str | None
     ) -> bool:
-        cursor = await self._execute(
-            """
-            INSERT OR IGNORE INTO reviews(deal_id, rater_id, target_id, rating, text, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (deal_id, rater_id, target_id, rating, text, now_iso()),
+        created = bool(
+            await self._execute(
+                """
+                INSERT INTO reviews(deal_id, rater_id, target_id, rating, text, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (deal_id, rater_id, target_id, rating, text, now_iso()),
+            )
         )
-        created = bool(cursor.rowcount)
         if created:
             await self.refresh_rating(target_id)
         return created
 
-    async def list_reviews_for(self, user_id: int, limit: int = 5) -> list[aiosqlite.Row]:
+    async def list_reviews_for(self, user_id: int, limit: int = 5) -> list[Mapping[str, Any]]:
         return await self._fetchall(
             """
             SELECT r.*, u.username AS rater_username, u.first_name AS rater_name
@@ -491,16 +490,16 @@ class Database:
 
     # --- жалобы, топ, реклама ---------------------------------------------
     async def create_report(self, listing_id: int | None, reporter_id: int, reason: str) -> int:
-        cursor = await self._execute(
+        return await self._insert_id(
             """
             INSERT INTO reports(listing_id, reporter_id, reason, created_at)
             VALUES (?, ?, ?, ?)
+            RETURNING id
             """,
             (listing_id, reporter_id, reason, now_iso()),
         )
-        return int(cursor.lastrowid or 0)
 
-    async def list_open_reports(self, limit: int = 20) -> list[aiosqlite.Row]:
+    async def list_open_reports(self, limit: int = 20) -> list[Mapping[str, Any]]:
         return await self._fetchall(
             """
             SELECT r.*, u.username AS reporter_username, l.title AS listing_title
@@ -534,33 +533,32 @@ class Database:
     async def create_ad(
         self, partner_name: str, text: str, days: int, price: int, created_by: int
     ) -> int:
-        cursor = await self._execute(
+        return await self._insert_id(
             """
             INSERT INTO ads(partner_name, text, starts_at, ends_at, price, status, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
+            RETURNING id
             """,
             (partner_name, text, now_iso(), iso_in_days(days), price, created_by, now_iso()),
         )
-        return int(cursor.lastrowid or 0)
 
     async def set_ad_status(self, ad_id: int, status: str) -> None:
         await self._execute("UPDATE ads SET status = ? WHERE id = ?", (status, ad_id))
 
-    async def get_ad(self, ad_id: int) -> aiosqlite.Row | None:
+    async def get_ad(self, ad_id: int) -> Mapping[str, Any] | None:
         return await self._fetchone("SELECT * FROM ads WHERE id = ?", (ad_id,))
 
-    async def list_active_ads(self) -> list[aiosqlite.Row]:
+    async def list_active_ads(self) -> list[Mapping[str, Any]]:
         return await self._fetchall(
             "SELECT * FROM ads WHERE status = 'active' AND (ends_at IS NULL OR ends_at > ?)",
             (now_iso(),),
         )
 
     async def expire_ads(self) -> int:
-        cursor = await self._execute(
+        return await self._execute(
             "UPDATE ads SET status = 'expired' WHERE status = 'active' AND ends_at IS NOT NULL AND ends_at <= ?",
             (now_iso(),),
         )
-        return int(cursor.rowcount or 0)
 
     # --- события, метрики, meta -------------------------------------------
     async def log_event(
@@ -653,19 +651,19 @@ class Database:
     async def create_community(
         self, code: str, title: str, city: str, ambassador_user_id: int | None = None
     ) -> int:
-        cursor = await self._execute(
-            "INSERT INTO communities(code, title, city, ambassador_user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        return await self._insert_id(
+            "INSERT INTO communities(code, title, city, ambassador_user_id, created_at)"
+            " VALUES (?, ?, ?, ?, ?) RETURNING id",
             (code, title, city, ambassador_user_id, now_iso()),
         )
-        return int(cursor.lastrowid or 0)
 
-    async def get_community(self, community_id: int) -> aiosqlite.Row | None:
+    async def get_community(self, community_id: int) -> Mapping[str, Any] | None:
         return await self._fetchone("SELECT * FROM communities WHERE id = ?", (community_id,))
 
-    async def get_community_by_code(self, code: str) -> aiosqlite.Row | None:
+    async def get_community_by_code(self, code: str) -> Mapping[str, Any] | None:
         return await self._fetchone("SELECT * FROM communities WHERE code = ?", (code,))
 
-    async def list_active_communities(self) -> list[aiosqlite.Row]:
+    async def list_active_communities(self) -> list[Mapping[str, Any]]:
         return await self._fetchall(
             "SELECT * FROM communities WHERE is_active = 1 ORDER BY created_at ASC"
         )
@@ -691,7 +689,7 @@ class Database:
             or 0
         )
 
-    async def list_communities_with_counts(self, active_only: bool = False) -> list[aiosqlite.Row]:
+    async def list_communities_with_counts(self, active_only: bool = False) -> list[Mapping[str, Any]]:
         """Площадки вместе с числом активных объявлений и активных участников."""
         return await self._fetchall(
             """
@@ -719,10 +717,10 @@ class Database:
 
     async def adopt_unassigned(self, community_id: int) -> tuple[int, int]:
         """Первая площадка забирает всё, что ещё не привязано. Возвращает (людей, объявлений)."""
-        users_cursor = await self._execute(
+        moved_users = await self._execute(
             "UPDATE users SET community_id = ? WHERE community_id IS NULL", (community_id,)
         )
-        listings_cursor = await self._execute(
+        moved_listings = await self._execute(
             "UPDATE listings SET community_id = ? WHERE community_id IS NULL", (community_id,)
         )
-        return int(users_cursor.rowcount or 0), int(listings_cursor.rowcount or 0)
+        return moved_users, moved_listings

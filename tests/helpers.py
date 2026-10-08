@@ -1,27 +1,53 @@
-"""Хелперы для тестов."""
+"""Хелперы для тестов.
+
+Тесты гоняются на SQLite по умолчанию. Если задать `TEST_DATABASE_URL` (строка подключения
+Postgres/Supabase), тот же набор тестов выполняется в облаке — каждый тест в своей схеме,
+которая удаляется после прогона:
+
+    $env:TEST_DATABASE_URL = "postgresql://postgres:...@...pooler.supabase.com:5432/postgres"
+    .venv\\Scripts\\python.exe -m pytest -q
+"""
 
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from bot.db import Database
+from bot.storage import PostgresBackend
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
+def test_database_url() -> str:
+    return os.getenv("TEST_DATABASE_URL", "").strip()
+
+
 @asynccontextmanager
 async def open_db(tmp_path: Path, name: str = "test.db") -> AsyncIterator[Database]:
-    db = Database(Path(tmp_path) / name)
-    await db.connect()
+    url = test_database_url()
+    if url:
+        schema = f"test_{uuid.uuid4().hex[:12]}"
+        database = Database(backend=PostgresBackend(url, schema=schema, drop_schema_on_close=True))
+        await database.connect()
+        try:
+            yield database
+        finally:
+            await database.close()
+        return
+
+    database = Database(Path(tmp_path) / name)
+    await database.connect()
     try:
-        yield db
+        yield database
     finally:
-        await db.close()
+        await database.close()
 
 
 async def make_user(db: Database, tg_id: int, username: str = "user", first_name: str = "Юзер"):

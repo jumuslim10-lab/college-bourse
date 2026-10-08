@@ -36,15 +36,22 @@ class Config:
     db_path: Path
     digest_hour: int
     bootstrap_categories: bool
+    db_backend: str = "sqlite"
+    database_url: str = ""
 
 
 def load_config() -> Config:
     db_raw = os.getenv("DB_PATH", "").strip()
     digest_raw = os.getenv("DIGEST_HOUR", "").strip()
+    backend = os.getenv("DB_BACKEND", "").strip().lower() or "sqlite"
+    if backend not in {"sqlite", "postgres"}:
+        raise SystemExit(f"DB_BACKEND={backend!r} не поддерживается. Разрешено: sqlite или postgres.")
     return Config(
         bot_token=os.getenv("BOT_TOKEN", "").strip(),
         admin_ids=parse_admin_ids(os.getenv("ADMIN_IDS", "")),
         db_path=Path(db_raw) if db_raw else BASE_DIR / "data" / "bot.db",
         digest_hour=int(digest_raw) if digest_raw.isdigit() else 8,
         bootstrap_categories=parse_bool(os.getenv("BOOTSTRAP_CATEGORIES", "")),
+        db_backend=backend,
+        database_url=os.getenv("DATABASE_URL", "").strip(),
     )

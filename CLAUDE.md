@@ -20,7 +20,7 @@
 ```powershell
 # если .venv ещё нет:
 # python -m venv .venv; .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest -q      # 42 теста должны остаться зелёными
+.venv\Scripts\python.exe -m pytest -q      # 47 тестов должны остаться зелёными
 .venv\Scripts\python.exe -m ruff check .   # линтер должен остаться чистым
 ```
 
@@ -32,10 +32,16 @@
 - Разделы, TTL и правило видимости — в `bot/categories.py`.
 - Бизнес-логика публикации, модерации, топа, дайджеста — в `bot/services.py`, не в хендлерах.
 - Все SQL-запросы — в `bot/db.py`; в хендлерах SQL писать нельзя.
-- Поиск идёт по колонке `listings.search_text`: SQLite не умеет регистронезависимый `LIKE`
-  для кириллицы, поэтому нормализация делается в Python.
+- SQL обязан быть диалект-нейтральным: проект работает и на SQLite, и на Postgres (Supabase).
+  Нельзя `INSERT OR IGNORE`, `AUTOINCREMENT`, `PRAGMA ...(` , `sqlite_master`, `lastrowid`,
+  `cursor.rowcount`, `executescript` — вместо них `ON CONFLICT DO NOTHING`, `RETURNING id`
+  и методы бэкенда. Диалектный код живёт только в `bot/storage.py`. Эти запреты проверяет
+  `tests/test_storage.py::test_repository_sql_stays_dialect_neutral`.
+- Схема правится в **двух** файлах: `schema.sql` и `schema_postgres.sql`. Наборы таблиц и колонок
+  обязаны совпадать (проверяет `test_both_schemas_define_same_tables_and_columns`).
 - Изменения схемы: `schema.sql` + догоняющая миграция в `Database.migrate()` (через
-  `PRAGMA table_info`), чтобы существующая база обновлялась сама.
+  `PRAGMA table_info`/`information_schema` — метод `backend.column_names`), чтобы существующая
+  база обновлялась сама.
 - Формат callback-данных и FSM-состояния не выдумывать: они перечислены в `PROMPT.md`, раздел 8.
 - Площадки: фильтр по площадке — необязательный параметр `community_id` в запросах
   (`None` = общий вид, видно всё). Новые запросы к `listings`, которые видит студент, обязаны
@@ -60,6 +66,9 @@
   `communities`, инвайт-ссылки `?start=<код>`, кнопка «🏢 Площадки», общий вид «🌍 Все площадки»,
   фильтрация каталога/поиска/статистики/рассылок по площадке, админка площадок, первая площадка
   забирает общий пул.
+- **Хранилище переключаемое**: SQLite по умолчанию (`DB_BACKEND=sqlite`), Postgres/Supabase по
+  флагу (`DB_BACKEND=postgres` + `DATABASE_URL`). Драйверы — `bot/storage.py`, схемы — `schema.sql`
+  и `schema_postgres.sql`. Тесты гоняются на обеих базах; на облачной — через `TEST_DATABASE_URL`.
 - **Не реализовано (ждёт гейтов)**: статистика продавца, подписка «Продавец+», платное размещение
   объявлений от 5 000 сом, амбассадоры с долей выручки, отдельные админы на площадку.
   Спецификации — `PROMPT.md`, раздел 16.

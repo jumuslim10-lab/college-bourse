@@ -305,22 +305,34 @@ pytest + ruff для проверок. Сознательно **без** ORM, б
 |---|---|---|
 | `BOT_TOKEN` | токен от @BotFather | пусто (бот не стартует с понятным сообщением) |
 | `ADMIN_IDS` | tg_id админов через запятую | пусто (модерации нет ни у кого, предупреждение в лог) |
+| `DB_BACKEND` | `sqlite` или `postgres` (Supabase) | `sqlite` |
+| `DATABASE_URL` | строка подключения Postgres; нужна только при `DB_BACKEND=postgres` | пусто |
 | `DB_PATH` | путь к файлу БД | `data/bot.db` |
 | `DIGEST_HOUR` | час локального времени для дайджеста | 8 |
 | `BOOTSTRAP_CATEGORIES` | показывать все разделы, пока биржа раскручивается | true |
+
+**Хранилище: SQLite по умолчанию, Postgres (Supabase) по флагу.** Все SQL проекта живут в
+`bot/db.py` и пишутся диалект-нейтрально: `?` как плейсхолдер, `RETURNING id` вместо `lastrowid`,
+`ON CONFLICT DO NOTHING` вместо `INSERT OR IGNORE`. Диалектные детали (PRAGMA, information_schema,
+пул соединений, перевод `?` в `$n`) спрятаны в `bot/storage.py`. Переключение — `DB_BACKEND` в `.env`.
+Тесты гоняются на обеих СУБД: без `TEST_DATABASE_URL` на SQLite, с ним — на Postgres, каждый тест
+в своей схеме. Запрет на SQLite-конструкции в `db.py` проверяет отдельный тест.
 
 **Структура (все файлы существуют):**
 
 ```
 college-bourse/
   run.py                 точка входа: конфиг → БД → диспетчер → polling + планировщик
-  schema.sql             схема БД, применяется при каждом старте (idempotent)
+  schema.sql             схема SQLite, применяется при каждом старте (idempotent)
+  schema_postgres.sql    та же схема для Postgres/Supabase
   pytest.ini             pythonpath=., testpaths=tests
-  requirements.txt       aiogram, aiosqlite, python-dotenv
+  requirements.txt       aiogram, aiosqlite, asyncpg, python-dotenv
   requirements-dev.txt   + pytest, ruff
   .env.example / .env    конфиг (`.env` в git не попадает)
+  start-bot.cmd          запуск бота в один клик для Windows
   bot/
     config.py            чтение .env, Config (frozen dataclass)
+    storage.py           драйверы БД за одним интерфейсом: SqliteBackend и PostgresBackend
     categories.py        разделы, TTL, MIN_ACTIVE_FOR_VISIBLE, правило is_visible
     validation.py        длины, цена, автофильтр (BAD_WORD_PATTERNS), normalize, bad_word_error
     services.py          MAX_ACTIVE_PER_USER, RATE_LIMIT_SECONDS, BUMP_HOURS, submit_listing,
@@ -345,7 +357,7 @@ college-bourse/
       communities.py     «🏢 Площадки»: список, переключение, общий вид
       admin.py           модерация, жалобы, статистика, площадки, реклама, рассылка, топ, баны
   tests/                 helpers + test_db, test_categories, test_flows, test_wiring,
-                         test_communities
+                         test_communities, test_storage
   data/bot.db            создаётся автоматически (в git не попадает)
 ```
 
@@ -390,6 +402,11 @@ college-bourse/
 - Площадка в запросах — необязательный фильтр `(? IS NULL OR community_id = ?)`: `None` означает
   «общий вид» и показывает всё. Инвайт-коды хранятся в `communities.code` и находятся по ним через
   `get_community_by_code`.
+- Схем для проекта две: `schema.sql` (SQLite) и `schema_postgres.sql` (Postgres). Набор таблиц и
+  колонок в них обязан совпадать — это проверяет
+  `test_both_schemas_define_same_tables_and_columns`. В Postgres даты тоже хранятся в `TEXT`
+  (ISO-8601 UTC), чтобы сравнения и сортировки в коде работали одинаково в обеих СУБД; переход на
+  `timestamptz` — отдельная задача, если когда-нибудь понадобится.
 - События пишутся во всех ключевых точках: `listing_submitted`, `listing_activated`, `listing_rejected`,
   `listing_closed`, `bump_requested`, `bump_granted`, `contact_shown`, `deal_created`, `deal_done`,
   `report_created`. Это основа статистики и будущей «статистики продавца».
@@ -528,7 +545,7 @@ college-bourse/
 
 ## 14. Тесты и приёмка
 
-**Автоматически (42 теста, все зелёные):**
+**Автоматически (47 тестов, все зелёные):**
 
 - `tests/test_db.py` — идемпотентный upsert пользователя, поиск по username и id, установка
   `expires_at` по TTL, авто-архив только просроченных, приоритет топового объявления,
@@ -544,6 +561,8 @@ college-bourse/
   вход по коду (в т.ч. выключенная площадка), наследование площадки объявлением, изоляция
   каталога и поиска, статистика по площадке, забор общего пула первой площадкой,
   счётчики площадки, пересборка индекса.
+- `tests/test_storage.py` — паритет двух схем, запрет SQLite-конструкций в `bot/db.py`,
+  перевод плейсхолдеров в Postgres, выбор бэкенда по конфигу, отказ при пустом `DATABASE_URL`.
 
 **Команды:**
 
@@ -552,6 +571,16 @@ college-bourse/
 .venv\Scripts\python.exe -m ruff check .
 .venv\Scripts\python.exe run.py
 ```
+
+**Прогон того же набора на облачной базе** (Postgres/Supabase) — по переменной окружения:
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql://postgres:...@...pooler.supabase.com:5432/postgres"
+.venv\Scripts\python.exe -m pytest -q
+```
+
+Каждый тест создаёт свою схему `test_<random>`, применяет схему проекта и удаляет её после себя,
+поэтому продовые таблицы не задеваются.
 
 **Ручная приёмка (в живом боте):** 3 фейковых пользователя публикуют по объявлению (одно с фото,
 одно «договорная», одно с запрещённым словом → авто-отказ), админ модерирует, каталог показывает,

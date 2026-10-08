@@ -16,6 +16,7 @@ from bot.db import Database
 from bot.handlers import ALL_ROUTERS
 from bot.middlewares import ThrottlingMiddleware, UserMiddleware
 from bot.scheduler import scheduler_loop
+from bot.storage import create_backend
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ async def main() -> None:
             "ADMIN_IDS пуст: очередь модерации, жалобы и админ-панель будут недоступны никому."
         )
 
-    db = Database(config.db_path)
+    db = Database(backend=create_backend(config))
     await db.connect()
 
     bot = Bot(token=config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -71,7 +72,7 @@ async def main() -> None:
 
     background = asyncio.create_task(scheduler_loop(bot, db, config))
 
-    logger.info("Бот запущен. База: %s. Админы: %s", db.path, config.admin_ids or "не заданы")
+    logger.info("Бот запущен. База: %s. Админы: %s", db.describe(), config.admin_ids or "не заданы")
     try:
         await dp.start_polling(bot, config=config)
     finally:
