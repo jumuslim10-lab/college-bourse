@@ -75,6 +75,7 @@ class Database:
 
     async def migrate(self) -> None:
         """Догоняющие миграции для баз, созданных более ранними версиями."""
+        # Миграция 1: search_text
         async with self.conn.execute("PRAGMA table_info(listings)") as cursor:
             columns = {row["name"] for row in await cursor.fetchall()}
         if "search_text" not in columns:
@@ -87,6 +88,24 @@ class Database:
                     "UPDATE listings SET search_text = ? WHERE id = ?",
                     (search_key(row["title"], row["description"]), row["id"]),
                 )
+            await self.conn.commit()
+
+        # Миграция 2: community_id в users
+        async with self.conn.execute("PRAGMA table_info(users)") as cursor:
+            user_columns = {row["name"] for row in await cursor.fetchall()}
+        if "community_id" not in user_columns:
+            await self.conn.execute(
+                "ALTER TABLE users ADD COLUMN community_id INTEGER REFERENCES communities(id)"
+            )
+            await self.conn.commit()
+
+        # Миграция 3: community_id в listings
+        async with self.conn.execute("PRAGMA table_info(listings)") as cursor:
+            listing_columns = {row["name"] for row in await cursor.fetchall()}
+        if "community_id" not in listing_columns:
+            await self.conn.execute(
+                "ALTER TABLE listings ADD COLUMN community_id INTEGER REFERENCES communities(id)"
+            )
             await self.conn.commit()
 
     async def close(self) -> None:
@@ -549,4 +568,46 @@ class Database:
         await self._execute(
             "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
+        )
+
+    # --- площадки (communities) --------------------------------------------
+    async def create_community(
+        self, code: str, title: str, city: str, ambassador_user_id: int | None = None
+    ) -> int:
+        cursor = await self._execute(
+            "INSERT INTO communities(code, title, city, ambassador_user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (code, title, city, ambassador_user_id, now_iso()),
+        )
+        return int(cursor.lastrowid or 0)
+
+    async def get_community(self, community_id: int) -> aiosqlite.Row | None:
+        return await self._fetchone("SELECT * FROM communities WHERE id = ?", (community_id,))
+
+    async def get_community_by_code(self, code: str) -> aiosqlite.Row | None:
+        return await self._fetchone("SELECT * FROM communities WHERE code = ?", (code,))
+
+    async def list_active_communities(self) -> list[aiosqlite.Row]:
+        return await self._fetchall(
+            "SELECT * FROM communities WHERE is_active = 1 ORDER BY created_at ASC"
+        )
+
+    async def set_user_community(self, user_id: int, community_id: int | None) -> None:
+        await self._execute("UPDATE users SET community_id = ? WHERE id = ?", (community_id, user_id))
+
+    async def count_community_users(self, community_id: int) -> int:
+        return int(
+            await self._scalar(
+                "SELECT COUNT(*) FROM users WHERE community_id = ? AND is_banned = 0",
+                (community_id,),
+            )
+            or 0
+        )
+
+    async def count_community_listings(self, community_id: int, status: str = "active") -> int:
+        return int(
+            await self._scalar(
+                "SELECT COUNT(*) FROM listings WHERE community_id = ? AND status = ?",
+                (community_id, status),
+            )
+            or 0
         )

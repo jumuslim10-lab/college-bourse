@@ -1,11 +1,22 @@
 -- Схема БД биржи колледжа. Применяется при каждом старте (idempotent).
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS communities (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    code              TEXT    NOT NULL UNIQUE,
+    title             TEXT    NOT NULL,
+    city              TEXT    NOT NULL,
+    is_active         INTEGER NOT NULL DEFAULT 1,
+    ambassador_user_id INTEGER REFERENCES users(id),
+    created_at        TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id        INTEGER NOT NULL UNIQUE,
     username     TEXT,
     first_name   TEXT,
+    community_id INTEGER REFERENCES communities(id),
     role         TEXT    NOT NULL DEFAULT 'student',
     is_banned    INTEGER NOT NULL DEFAULT 0,
     warn_count   INTEGER NOT NULL DEFAULT 0,
@@ -28,6 +39,7 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE TABLE IF NOT EXISTS listings (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     author_id      INTEGER NOT NULL REFERENCES users(id),
+    community_id   INTEGER REFERENCES communities(id),
     kind           TEXT    NOT NULL CHECK (kind IN ('sell', 'buy')),
     category_code  TEXT    NOT NULL REFERENCES categories(code),
     title          TEXT    NOT NULL,
@@ -44,8 +56,9 @@ CREATE TABLE IF NOT EXISTS listings (
     reject_reason  TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_listings_cat  ON listings(status, category_code, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_listings_cat  ON listings(status, category_code, community_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_listings_user ON listings(author_id, status);
+CREATE INDEX IF NOT EXISTS idx_listings_community ON listings(community_id, status);
 
 CREATE TABLE IF NOT EXISTS deals (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
