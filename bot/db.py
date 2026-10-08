@@ -18,6 +18,20 @@ def search_key(title: str, description: str) -> str:
     return normalize(f"{title} {description}").lower()
 
 
+def community_clause(
+    community_id: int | None, column: str = "community_id"
+) -> tuple[str, tuple[Any, ...]]:
+    """Условие по площадке для WHERE.
+
+    При `None` условие не добавляется вовсе — и это не мелочь: Postgres не может вывести тип
+    параметра в конструкции `? IS NULL` (ошибка IndeterminateDatatypeError), а в SQLite лишний
+    `OR` мешает индексу. Поэтому фильтр собирается динамически.
+    """
+    if community_id is None:
+        return "", ()
+    return f" AND {column} = ?", (community_id,)
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -218,13 +232,13 @@ class Database:
         )
 
     async def active_user_ids(self, days: int = 30, community_id: int | None = None) -> list[int]:
+        clause, clause_params = community_clause(community_id)
         rows = await self._fetchall(
-            """
+            f"""
             SELECT tg_id FROM users
-            WHERE is_banned = 0 AND last_seen_at >= ?
-                AND (? IS NULL OR community_id = ?)
+            WHERE is_banned = 0 AND last_seen_at >= ?{clause}
             """,
-            (iso_days_ago(days), community_id, community_id),
+            (iso_days_ago(days), *clause_params),
         )
         return [int(row["tg_id"]) for row in rows]
 
@@ -316,52 +330,51 @@ class Database:
         community_id: int | None = None,
     ) -> list[Mapping[str, Any]]:
         """community_id=None — показываем объявления всех площадок (режим одной площадки)."""
+        clause, clause_params = community_clause(community_id, "l.community_id")
         return await self._fetchall(
             f"""
             SELECT {CARD_COLUMNS}
             FROM listings l JOIN users u ON u.id = l.author_id
-            WHERE l.status = 'active' AND l.category_code = ?
-                AND (? IS NULL OR l.community_id = ?)
+            WHERE l.status = 'active' AND l.category_code = ?{clause}
             ORDER BY CASE WHEN l.bumped_until IS NOT NULL AND l.bumped_until > ? THEN 1 ELSE 0 END DESC,
                      l.created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (category_code, community_id, community_id, now_iso(), limit, offset),
+            (category_code, *clause_params, now_iso(), limit, offset),
         )
 
     async def count_active(self, category_code: str, community_id: int | None = None) -> int:
+        clause, clause_params = community_clause(community_id)
         return int(
             await self._scalar(
-                """
+                f"""
                 SELECT COUNT(*) FROM listings
-                WHERE status = 'active' AND category_code = ?
-                    AND (? IS NULL OR community_id = ?)
+                WHERE status = 'active' AND category_code = ?{clause}
                 """,
-                (category_code, community_id, community_id),
+                (category_code, *clause_params),
             )
             or 0
         )
 
     async def category_counts(self, community_id: int | None = None) -> dict[str, int]:
+        clause, clause_params = community_clause(community_id)
         rows = await self._fetchall(
-            """
+            f"""
             SELECT category_code, COUNT(*) AS amount
             FROM listings
-            WHERE status = 'active' AND (? IS NULL OR community_id = ?)
+            WHERE status = 'active'{clause}
             GROUP BY category_code
             """,
-            (community_id, community_id),
+            clause_params,
         )
         return {row["category_code"]: int(row["amount"]) for row in rows}
 
     async def count_all_active(self, community_id: int | None = None) -> int:
+        clause, clause_params = community_clause(community_id)
         return int(
             await self._scalar(
-                """
-                SELECT COUNT(*) FROM listings
-                WHERE status = 'active' AND (? IS NULL OR community_id = ?)
-                """,
-                (community_id, community_id),
+                f"SELECT COUNT(*) FROM listings WHERE status = 'active'{clause}",
+                clause_params,
             )
             or 0
         )
@@ -373,16 +386,16 @@ class Database:
         if not key:
             return []
         pattern = f"%{key}%"
+        clause, clause_params = community_clause(community_id, "l.community_id")
         return await self._fetchall(
             f"""
             SELECT {CARD_COLUMNS}
             FROM listings l JOIN users u ON u.id = l.author_id
-            WHERE l.status = 'active' AND l.search_text LIKE ?
-                AND (? IS NULL OR l.community_id = ?)
+            WHERE l.status = 'active' AND l.search_text LIKE ?{clause}
             ORDER BY l.created_at DESC
             LIMIT ?
             """,
-            (pattern, community_id, community_id, limit),
+            (pattern, *clause_params, limit),
         )
 
     async def set_listing_status(
@@ -577,46 +590,48 @@ class Database:
     async def stats(self, days: int = 7, community_id: int | None = None) -> dict[str, Any]:
         """Сводка. community_id=None — по всем площадкам сразу."""
         since = iso_days_ago(days)
+        user_clause, user_params = community_clause(community_id)
+        listing_clause, listing_params = community_clause(community_id)
+        deal_clause, deal_params = community_clause(community_id, "l.community_id")
         return {
             "users_active": int(
                 await self._scalar(
-                    """
+                    f"""
                     SELECT COUNT(*) FROM users
-                    WHERE last_seen_at >= ? AND (? IS NULL OR community_id = ?)
+                    WHERE last_seen_at >= ?{user_clause}
                     """,
-                    (since, community_id, community_id),
+                    (since, *user_params),
                 )
                 or 0
             ),
             "listings_created": int(
                 await self._scalar(
-                    """
+                    f"""
                     SELECT COUNT(*) FROM listings
-                    WHERE created_at >= ? AND (? IS NULL OR community_id = ?)
+                    WHERE created_at >= ?{listing_clause}
                     """,
-                    (since, community_id, community_id),
+                    (since, *listing_params),
                 )
                 or 0
             ),
             "listings_active": await self.count_all_active(community_id),
             "deals_done": int(
                 await self._scalar(
-                    """
+                    f"""
                     SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id
-                    WHERE d.status = 'done' AND d.closed_at >= ?
-                        AND (? IS NULL OR l.community_id = ?)
+                    WHERE d.status = 'done' AND d.closed_at >= ?{deal_clause}
                     """,
-                    (since, community_id, community_id),
+                    (since, *deal_params),
                 )
                 or 0
             ),
             "deals_total": int(
                 await self._scalar(
-                    """
+                    f"""
                     SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id
-                    WHERE (? IS NULL OR l.community_id = ?)
+                    WHERE 1 = 1{deal_clause}
                     """,
-                    (community_id, community_id),
+                    deal_params,
                 )
                 or 0
             ),
@@ -625,12 +640,11 @@ class Database:
             ),
             "contacts_shown": int(
                 await self._scalar(
-                    """
+                    f"""
                     SELECT COUNT(*) FROM events e JOIN listings l ON l.id = e.listing_id
-                    WHERE e.kind = 'contact_shown' AND e.created_at >= ?
-                        AND (? IS NULL OR l.community_id = ?)
+                    WHERE e.kind = 'contact_shown' AND e.created_at >= ?{deal_clause}
                     """,
-                    (since, community_id, community_id),
+                    (since, *deal_params),
                 )
                 or 0
             ),
@@ -691,18 +705,17 @@ class Database:
 
     async def list_communities_with_counts(self, active_only: bool = False) -> list[Mapping[str, Any]]:
         """Площадки вместе с числом активных объявлений и активных участников."""
+        where = " WHERE c.is_active = 1" if active_only else ""
         return await self._fetchall(
-            """
+            f"""
             SELECT c.*,
                    (SELECT COUNT(*) FROM listings l
                      WHERE l.community_id = c.id AND l.status = 'active') AS listings_count,
                    (SELECT COUNT(*) FROM users u
                      WHERE u.community_id = c.id AND u.is_banned = 0) AS users_count
-            FROM communities c
-            WHERE (? = 0 OR c.is_active = 1)
+            FROM communities c{where}
             ORDER BY c.created_at ASC
-            """,
-            (int(active_only),),
+            """
         )
 
     async def set_community_active(self, community_id: int, is_active: bool) -> None:

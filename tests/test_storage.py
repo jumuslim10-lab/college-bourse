@@ -26,6 +26,9 @@ FORBIDDEN_PATTERNS = (
     r"lastrowid",
     r"cursor\.rowcount",
     r"executescript",
+    # Postgres не умеет выводить тип параметра в `(? IS NULL OR ...)` — падает
+    # IndeterminateDatatypeError. Регулярка ищет именно SQL, а не упоминание в комментарии.
+    r"\(\s*\?\s+IS\s+NULL",
 )
 
 
