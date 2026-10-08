@@ -90,7 +90,9 @@ async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
 async def got_photo(message: Message, state: FSMContext) -> None:
     await state.update_data(photo=message.photo[-1].file_id)
     await state.set_state(NewListing.title)
-    await message.answer("Принял фото 📸 Теперь название (5–80 символов), например: «Кофе с собой 100 ₽».")
+    await message.answer(
+        f"Принял фото 📸 Теперь название (5–80 символов), например: «Кофе с собой 100 {texts.CURRENCY}»."
+    )
 
 
 @router.message(NewListing.photo, F.text)

@@ -16,7 +16,7 @@ from tests.helpers import make_listing, make_user, open_db, run
 
 def test_parse_price():
     assert parse_price("200") == (200, False, None)
-    assert parse_price("1 500 ₽") == (1500, False, None)
+    assert parse_price("1 500 сом") == (1500, False, None)
     assert parse_price("договорная") == (None, True, None)
     assert parse_price("торг") == (None, True, None)
     assert parse_price("0")[2] is not None

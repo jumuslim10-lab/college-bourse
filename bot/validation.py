@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from bot.texts import CURRENCY
+
 TITLE_MIN, TITLE_MAX = 5, 80
 DESCRIPTION_MIN, DESCRIPTION_MAX = 10, 600
 PRICE_MAX = 100_000
@@ -88,5 +90,5 @@ def parse_price(raw: str) -> tuple[int | None, bool, str | None]:
     if price <= 0:
         return None, False, "Цена должна быть больше нуля, либо напиши «договорная»."
     if price > PRICE_MAX:
-        return None, False, f"Слишком большая цена. Максимум {PRICE_MAX} ₽."
+        return None, False, f"Слишком большая цена. Максимум {PRICE_MAX} {CURRENCY}."
     return price, False, None
