@@ -40,3 +40,9 @@ class AdForm(StatesGroup):
 
 class Broadcast(StatesGroup):
     text = State()
+
+
+class CommunityForm(StatesGroup):
+    code = State()
+    title = State()
+    city = State()

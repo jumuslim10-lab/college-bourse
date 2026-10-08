@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 DIGEST_META_KEY = "last_digest_date"
 
 
-async def broadcast(bot: Bot, db: Database, text: str, days: int = 30) -> tuple[int, int]:
+async def broadcast(
+    bot: Bot, db: Database, text: str, days: int = 30, community_id: int | None = None
+) -> tuple[int, int]:
     """Рассылает text активным пользователям. Возвращает (доставлено, ошибок)."""
     delivered = failed = 0
-    for tg_id in await db.active_user_ids(days):
+    for tg_id in await db.active_user_ids(days, community_id):
         try:
             await bot.send_message(tg_id, text)
             delivered += 1
@@ -53,12 +55,23 @@ async def send_digest_if_due(bot: Bot, db: Database, config: Config) -> bool:
     if await db.meta_get(DIGEST_META_KEY) == today:
         return False
 
-    digest = await services.build_digest(db)
-    if digest:
-        delivered, failed = await broadcast(bot, db, digest)
-        logger.info("Дайджест отправлен: %s доставлено, %s ошибок", delivered, failed)
+    # Дайджест считается отдельно для каждой площадки, чтобы объявления не перетекали
+    # между колледжами. Пользователи без площадки получают общий дайджест.
+    targets: list[tuple[int | None, str]] = [(None, "все площадки")]
+    for community in await db.list_communities_with_counts(active_only=True):
+        targets.append((int(community["id"]), str(community["title"])))
+
+    sent_any = False
+    for community_id, title in targets:
+        digest = await services.build_digest(db, community_id=community_id)
+        if not digest:
+            continue
+        delivered, failed = await broadcast(bot, db, digest, community_id=community_id)
+        logger.info("Дайджест «%s»: %s доставлено, %s ошибок", title, delivered, failed)
+        sent_any = True
+
     await db.meta_set(DIGEST_META_KEY, today)
-    return bool(digest)
+    return sent_any
 
 
 async def tick(bot: Bot, db: Database, config: Config) -> None:

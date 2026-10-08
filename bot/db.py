@@ -108,6 +108,19 @@ class Database:
             )
             await self.conn.commit()
 
+        # Миграция 4: пересобрать индекс раздела с учётом площадки. CREATE INDEX IF NOT EXISTS
+        # не обновляет определение уже существующего индекса, поэтому проверяем руками.
+        index_row = await self._fetchone(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_listings_cat'"
+        )
+        if index_row is not None and "community_id" not in (index_row["sql"] or ""):
+            await self.conn.execute("DROP INDEX IF EXISTS idx_listings_cat")
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_listings_cat"
+                " ON listings(status, category_code, community_id, created_at DESC)"
+            )
+            await self.conn.commit()
+
     async def close(self) -> None:
         if self._conn is not None:
             await self._conn.close()
@@ -207,9 +220,14 @@ class Database:
             (int(row["total"]), int(row["amount"]), user_id),
         )
 
-    async def active_user_ids(self, days: int = 30) -> list[int]:
+    async def active_user_ids(self, days: int = 30, community_id: int | None = None) -> list[int]:
         rows = await self._fetchall(
-            "SELECT tg_id FROM users WHERE is_banned = 0 AND last_seen_at >= ?", (iso_days_ago(days),)
+            """
+            SELECT tg_id FROM users
+            WHERE is_banned = 0 AND last_seen_at >= ?
+                AND (? IS NULL OR community_id = ?)
+            """,
+            (iso_days_ago(days), community_id, community_id),
         )
         return [int(row["tg_id"]) for row in rows]
 
@@ -218,6 +236,7 @@ class Database:
         self,
         *,
         author_id: int,
+        community_id: int | None = None,
         kind: str,
         category_code: str,
         title: str,
@@ -231,12 +250,13 @@ class Database:
         cursor = await self._execute(
             """
             INSERT INTO listings(
-                author_id, kind, category_code, title, description, search_text, price,
+                author_id, community_id, kind, category_code, title, description, search_text, price,
                 is_negotiable, photo_file_id, status, created_at, reject_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 author_id,
+                community_id,
                 kind,
                 category_code,
                 title,
@@ -292,41 +312,66 @@ class Database:
         )
 
     async def list_active(
-        self, category_code: str, limit: int, offset: int = 0
+        self,
+        category_code: str,
+        limit: int,
+        offset: int = 0,
+        community_id: int | None = None,
     ) -> list[aiosqlite.Row]:
+        """community_id=None — показываем объявления всех площадок (режим одной площадки)."""
         return await self._fetchall(
             f"""
             SELECT {CARD_COLUMNS}
             FROM listings l JOIN users u ON u.id = l.author_id
             WHERE l.status = 'active' AND l.category_code = ?
+                AND (? IS NULL OR l.community_id = ?)
             ORDER BY CASE WHEN l.bumped_until IS NOT NULL AND l.bumped_until > ? THEN 1 ELSE 0 END DESC,
                      l.created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (category_code, now_iso(), limit, offset),
+            (category_code, community_id, community_id, now_iso(), limit, offset),
         )
 
-    async def count_active(self, category_code: str) -> int:
+    async def count_active(self, category_code: str, community_id: int | None = None) -> int:
         return int(
             await self._scalar(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category_code = ?",
-                (category_code,),
+                """
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'active' AND category_code = ?
+                    AND (? IS NULL OR community_id = ?)
+                """,
+                (category_code, community_id, community_id),
             )
             or 0
         )
 
-    async def category_counts(self) -> dict[str, int]:
+    async def category_counts(self, community_id: int | None = None) -> dict[str, int]:
         rows = await self._fetchall(
-            "SELECT category_code, COUNT(*) AS amount FROM listings WHERE status = 'active' GROUP BY category_code"
+            """
+            SELECT category_code, COUNT(*) AS amount
+            FROM listings
+            WHERE status = 'active' AND (? IS NULL OR community_id = ?)
+            GROUP BY category_code
+            """,
+            (community_id, community_id),
         )
         return {row["category_code"]: int(row["amount"]) for row in rows}
 
-    async def count_all_active(self) -> int:
+    async def count_all_active(self, community_id: int | None = None) -> int:
         return int(
-            await self._scalar("SELECT COUNT(*) FROM listings WHERE status = 'active'") or 0
+            await self._scalar(
+                """
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'active' AND (? IS NULL OR community_id = ?)
+                """,
+                (community_id, community_id),
+            )
+            or 0
         )
 
-    async def search_active(self, query: str, limit: int = 10) -> list[aiosqlite.Row]:
+    async def search_active(
+        self, query: str, limit: int = 10, community_id: int | None = None
+    ) -> list[aiosqlite.Row]:
         key = normalize(query).lower()
         if not key:
             return []
@@ -336,10 +381,11 @@ class Database:
             SELECT {CARD_COLUMNS}
             FROM listings l JOIN users u ON u.id = l.author_id
             WHERE l.status = 'active' AND l.search_text LIKE ?
+                AND (? IS NULL OR l.community_id = ?)
             ORDER BY l.created_at DESC
             LIMIT ?
             """,
-            (pattern, limit),
+            (pattern, community_id, community_id, limit),
         )
 
     async def set_listing_status(
@@ -530,34 +576,67 @@ class Database:
             (kind, user_id, listing_id, meta, now_iso()),
         )
 
-    async def stats(self, days: int = 7) -> dict[str, Any]:
+    async def stats(self, days: int = 7, community_id: int | None = None) -> dict[str, Any]:
+        """Сводка. community_id=None — по всем площадкам сразу."""
         since = iso_days_ago(days)
         return {
             "users_active": int(
-                await self._scalar("SELECT COUNT(*) FROM users WHERE last_seen_at >= ?", (since,)) or 0
-            ),
-            "listings_created": int(
-                await self._scalar("SELECT COUNT(*) FROM listings WHERE created_at >= ?", (since,)) or 0
-            ),
-            "listings_active": await self.count_all_active(),
-            "deals_done": int(
                 await self._scalar(
-                    "SELECT COUNT(*) FROM deals WHERE status = 'done' AND closed_at >= ?", (since,)
+                    """
+                    SELECT COUNT(*) FROM users
+                    WHERE last_seen_at >= ? AND (? IS NULL OR community_id = ?)
+                    """,
+                    (since, community_id, community_id),
                 )
                 or 0
             ),
-            "deals_total": int(await self._scalar("SELECT COUNT(*) FROM deals") or 0),
+            "listings_created": int(
+                await self._scalar(
+                    """
+                    SELECT COUNT(*) FROM listings
+                    WHERE created_at >= ? AND (? IS NULL OR community_id = ?)
+                    """,
+                    (since, community_id, community_id),
+                )
+                or 0
+            ),
+            "listings_active": await self.count_all_active(community_id),
+            "deals_done": int(
+                await self._scalar(
+                    """
+                    SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id
+                    WHERE d.status = 'done' AND d.closed_at >= ?
+                        AND (? IS NULL OR l.community_id = ?)
+                    """,
+                    (since, community_id, community_id),
+                )
+                or 0
+            ),
+            "deals_total": int(
+                await self._scalar(
+                    """
+                    SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id
+                    WHERE (? IS NULL OR l.community_id = ?)
+                    """,
+                    (community_id, community_id),
+                )
+                or 0
+            ),
             "reports_open": int(
                 await self._scalar("SELECT COUNT(*) FROM reports WHERE status = 'open'") or 0
             ),
             "contacts_shown": int(
                 await self._scalar(
-                    "SELECT COUNT(*) FROM events WHERE kind = 'contact_shown' AND created_at >= ?",
-                    (since,),
+                    """
+                    SELECT COUNT(*) FROM events e JOIN listings l ON l.id = e.listing_id
+                    WHERE e.kind = 'contact_shown' AND e.created_at >= ?
+                        AND (? IS NULL OR l.community_id = ?)
+                    """,
+                    (since, community_id, community_id),
                 )
                 or 0
             ),
-            "category_counts": await self.category_counts(),
+            "category_counts": await self.category_counts(community_id),
         }
 
     async def meta_get(self, key: str) -> str | None:
@@ -611,3 +690,39 @@ class Database:
             )
             or 0
         )
+
+    async def list_communities_with_counts(self, active_only: bool = False) -> list[aiosqlite.Row]:
+        """Площадки вместе с числом активных объявлений и активных участников."""
+        return await self._fetchall(
+            """
+            SELECT c.*,
+                   (SELECT COUNT(*) FROM listings l
+                     WHERE l.community_id = c.id AND l.status = 'active') AS listings_count,
+                   (SELECT COUNT(*) FROM users u
+                     WHERE u.community_id = c.id AND u.is_banned = 0) AS users_count
+            FROM communities c
+            WHERE (? = 0 OR c.is_active = 1)
+            ORDER BY c.created_at ASC
+            """,
+            (int(active_only),),
+        )
+
+    async def set_community_active(self, community_id: int, is_active: bool) -> None:
+        await self._execute(
+            "UPDATE communities SET is_active = ? WHERE id = ?", (int(is_active), community_id)
+        )
+
+    async def set_community_ambassador(self, community_id: int, user_id: int | None) -> None:
+        await self._execute(
+            "UPDATE communities SET ambassador_user_id = ? WHERE id = ?", (user_id, community_id)
+        )
+
+    async def adopt_unassigned(self, community_id: int) -> tuple[int, int]:
+        """Первая площадка забирает всё, что ещё не привязано. Возвращает (людей, объявлений)."""
+        users_cursor = await self._execute(
+            "UPDATE users SET community_id = ? WHERE community_id IS NULL", (community_id,)
+        )
+        listings_cursor = await self._execute(
+            "UPDATE listings SET community_id = ? WHERE community_id IS NULL", (community_id,)
+        )
+        return int(users_cursor.rowcount or 0), int(listings_cursor.rowcount or 0)

@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot import keyboards, texts
+from bot import keyboards, services, texts
 from bot.db import Database
 from bot.handlers.states import Review
 
@@ -27,6 +27,9 @@ async def start_deal(callback: CallbackQuery, db: Database, user, bot: Bot) -> N
     listing = await db.get_listing(listing_id)
     if listing is None or listing["status"] != "active":
         await callback.answer("Объявление уже неактуально", show_alert=True)
+        return
+    if not services.can_view_community(user["community_id"], listing["community_id"]):
+        await callback.answer(texts.COMMUNITY_OTHER, show_alert=True)
         return
     if listing["author_id"] == user["id"]:
         await callback.answer("Это твоё объявление 🙂", show_alert=True)

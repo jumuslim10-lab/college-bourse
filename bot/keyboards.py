@@ -18,16 +18,15 @@ from bot.categories import Category
 CATALOG_PAGE_SIZE = 8
 
 
-def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=texts.BTN_CATALOG), KeyboardButton(text=texts.BTN_NEW)],
-            [KeyboardButton(text=texts.BTN_MY), KeyboardButton(text=texts.BTN_SEARCH)],
-            [KeyboardButton(text=texts.BTN_HELP)],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
+def main_menu(show_communities: bool = False) -> ReplyKeyboardMarkup:
+    rows: list[list[KeyboardButton]] = [
+        [KeyboardButton(text=texts.BTN_CATALOG), KeyboardButton(text=texts.BTN_NEW)],
+        [KeyboardButton(text=texts.BTN_MY), KeyboardButton(text=texts.BTN_SEARCH)],
+    ]
+    if show_communities:
+        rows.append([KeyboardButton(text=texts.BTN_COMMUNITIES)])
+    rows.append([KeyboardButton(text=texts.BTN_HELP)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
 def rules_kb() -> InlineKeyboardMarkup:
@@ -166,6 +165,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🗂 Очередь модерации", callback_data="admin:queue")],
             [InlineKeyboardButton(text="🚩 Жалобы", callback_data="admin:reports")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+            [InlineKeyboardButton(text="🏫 Площадки", callback_data="admin:communities")],
             [InlineKeyboardButton(text="📣 Реклама партнёра", callback_data="admin:ad")],
             [InlineKeyboardButton(text="✉️ Рассылка", callback_data="admin:broadcast")],
         ]
@@ -261,3 +261,46 @@ def review_start_kb(deal_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⭐ Оставить отзыв", callback_data=f"review:{deal_id}")]
         ]
     )
+
+
+def communities_kb(communities: list[Any], current_id: int | None) -> InlineKeyboardMarkup:
+    """Выбор площадки. current_id=None означает общий вид (все площадки)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in communities:
+        mark = "✅ " if current_id == row["id"] else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{mark}{texts.community_label(row)} — {row['listings_count']} объявл.",
+                    callback_data=f"switch_community:{row['id']}",
+                )
+            ]
+        )
+    if current_id is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.COMMUNITY_ALL_BUTTON, callback_data="switch_community:0"
+                )
+            ]
+        )
+    if not rows:
+        rows = [[InlineKeyboardButton(text="Площадок пока нет", callback_data="noop")]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_communities_kb(communities: list[Any]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=(
+                    f"{'🟢' if row['is_active'] else '⚪️'} {row['code']} — "
+                    f"{row['title']}: {row['listings_count']} объявл., {row['users_count']} чел."
+                ),
+                callback_data=f"comm_toggle:{row['id']}",
+            )
+        ]
+        for row in communities
+    ]
+    rows.append([InlineKeyboardButton(text="➕ Создать площадку", callback_data="comm_new")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

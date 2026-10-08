@@ -45,5 +45,5 @@ def test_dispatcher_assembles_every_router():
         len(router.message.handlers) + len(router.callback_query.handlers) for router in ALL_ROUTERS
     )
 
-    assert len(ALL_ROUTERS) == 6
+    assert len(ALL_ROUTERS) == 7
     assert handlers >= 25

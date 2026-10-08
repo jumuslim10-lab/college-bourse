@@ -11,13 +11,15 @@ from aiogram.types import CallbackQuery, Message
 from bot import keyboards, services, texts
 from bot.db import Database
 from bot.filters import IsAdmin
-from bot.handlers.states import AdForm, Broadcast, ModerateReason
+from bot.handlers.states import AdForm, Broadcast, CommunityForm, ModerateReason
 from bot.notify import notify_user
 from bot.scheduler import broadcast
 
 router = Router(name="admin")
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
+
+_bot_username: str | None = None
 
 
 async def _safe_edit(callback: CallbackQuery, text: str, markup=None) -> None:
@@ -27,6 +29,17 @@ async def _safe_edit(callback: CallbackQuery, text: str, markup=None) -> None:
         await callback.message.edit_text(text, reply_markup=markup)
     except TelegramBadRequest:
         await callback.message.answer(text, reply_markup=markup)
+
+
+async def _invite_link(bot: Bot, code: str) -> str:
+    """Инвайт-ссылка вида https://t.me/<bot>?start=<code>."""
+    global _bot_username
+    if _bot_username is None:
+        me = await bot.get_me()
+        _bot_username = me.username or ""
+    if not _bot_username:
+        return f"добавь ?start={code} к ссылке на бота (username бота не задан)"
+    return f"https://t.me/{_bot_username}?start={code}"
 
 
 @router.message(Command("admin"))
@@ -158,6 +171,14 @@ async def show_stats(callback: CallbackQuery, db: Database) -> None:
     if data["category_counts"]:
         lines.append("\nПо разделам:")
         lines.extend(f"  • {code}: {count}" for code, count in data["category_counts"].items())
+    communities = await db.list_communities_with_counts()
+    if communities:
+        lines.append("\nПо площадкам (сейчас):")
+        lines.extend(
+            f"  • {texts.community_label(row)}: объявлений {row['listings_count']}, "
+            f"людей {row['users_count']} ({texts.community_state(row)})"
+            for row in communities
+        )
     await _safe_edit(callback, "📊 <b>Статистика</b>\n\n" + "\n".join(lines), keyboards.admin_menu_kb())
     await callback.answer()
 
@@ -333,11 +354,116 @@ async def unban_user(message: Message, db: Database) -> None:
 @router.message(Command("stats"))
 async def stats_command(message: Message, db: Database) -> None:
     data = await db.stats(7)
-    await message.answer(
+    text = (
         "📊 <b>Статистика за 7 дней</b>\n\n"
         f"👥 Активных: {data['users_active']}\n"
         f"🆕 Объявлений: {data['listings_created']}\n"
         f"🛒 Активных сейчас: {data['listings_active']}\n"
         f"🤝 Сделок закрыто: {data['deals_done']}\n"
         f"👀 Контактов показано: {data['contacts_shown']}"
+    )
+    communities = await db.list_communities_with_counts()
+    if communities:
+        text += "\n\n🏫 По площадкам:\n" + "\n".join(
+            f"  • {texts.community_label(row)}: {row['listings_count']} объявл., "
+            f"{row['users_count']} чел., {texts.community_state(row)}"
+            for row in communities
+        )
+    await message.answer(text)
+
+
+# --- площадки --------------------------------------------------------------
+async def _render_communities(callback: CallbackQuery, db: Database) -> None:
+    rows = await db.list_communities_with_counts()
+    if not rows:
+        await _safe_edit(
+            callback, texts.ADMIN_COMMUNITIES_EMPTY, keyboards.admin_communities_kb([])
+        )
+        return
+    body = "\n".join(
+        f"{'🟢' if row['is_active'] else '⚪️'} <code>{texts.escape(row['code'])}</code> — "
+        f"{texts.community_label(row)}:\n"
+        f"     объявлений {row['listings_count']}, людей {row['users_count']}"
+        for row in rows
+    )
+    await _safe_edit(
+        callback,
+        texts.ADMIN_COMMUNITIES_HEADER.format(body=body),
+        keyboards.admin_communities_kb(rows),
+    )
+
+
+@router.callback_query(F.data == "admin:communities")
+async def show_communities_admin(callback: CallbackQuery, db: Database) -> None:
+    await _render_communities(callback, db)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("comm_toggle:"))
+async def toggle_community(callback: CallbackQuery, db: Database) -> None:
+    community_id = int(callback.data.split(":")[1])
+    community = await db.get_community(community_id)
+    if community is None:
+        await callback.answer("Площадка не найдена", show_alert=True)
+        return
+    new_state = not bool(community["is_active"])
+    await db.set_community_active(community_id, new_state)
+    await db.log_event(
+        "community_toggled",
+        meta=f"{community['code']}:{'on' if new_state else 'off'}",
+    )
+    await callback.answer("Включена ✅" if new_state else "Выключена ⚪️")
+    await _render_communities(callback, db)
+
+
+@router.callback_query(F.data == "comm_new")
+async def community_new_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(CommunityForm.code)
+    await callback.answer()
+    if callback.message is not None:
+        await callback.message.answer(texts.ADMIN_COMMUNITY_ASK_CODE)
+
+
+@router.message(CommunityForm.code, F.text)
+async def community_new_code(message: Message, state: FSMContext) -> None:
+    await state.update_data(code=" ".join(message.text.split())[:40])
+    await state.set_state(CommunityForm.title)
+    await message.answer(texts.ADMIN_COMMUNITY_ASK_TITLE)
+
+
+@router.message(CommunityForm.title, F.text)
+async def community_new_title(message: Message, state: FSMContext) -> None:
+    await state.update_data(title=" ".join(message.text.split())[:80])
+    await state.set_state(CommunityForm.city)
+    await message.answer(texts.ADMIN_COMMUNITY_ASK_CITY)
+
+
+@router.message(CommunityForm.city, F.text)
+async def community_new_city(
+    message: Message, state: FSMContext, db: Database, bot: Bot, user
+) -> None:
+    data = await state.get_data()
+    await state.clear()
+    community_id, error = await services.create_community(
+        db,
+        code=data.get("code", ""),
+        title=data.get("title", ""),
+        city=" ".join(message.text.split())[:60],
+    )
+    if error or community_id is None:
+        await message.answer(
+            f"❌ {error}\n\nСоздать заново: /admin → 🏫 Площадки → ➕ Создать площадку."
+        )
+        return
+
+    community = await db.get_community(community_id)
+    if community is None:
+        await message.answer("Площадка создана, но не нашлась в базе — проверь /admin.")
+        return
+    await db.log_event("community_created", user_id=user["id"], meta=community["code"])
+    link = await _invite_link(bot, community["code"])
+    await message.answer(
+        texts.ADMIN_COMMUNITY_CREATED.format(
+            title=texts.escape(community["title"]), link=link
+        )
     )

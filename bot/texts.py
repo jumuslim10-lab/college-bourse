@@ -10,6 +10,7 @@ BTN_NEW = "➕ Разместить"
 BTN_MY = "📁 Мои объявления"
 BTN_SEARCH = "🔍 Поиск"
 BTN_HELP = "❓ Помощь"
+BTN_COMMUNITIES = "🏢 Площадки"
 
 # Валюта проекта: меняется тут одной строкой при выходе в другую страну.
 CURRENCY = "сом"
@@ -108,3 +109,56 @@ def moderation_card(listing: Any) -> str:
         f"{escape(listing['description'])}\n\n"
         f"👤 {author_handle(listing['username'], listing['first_name'])}"
     )
+
+
+# --- площадки ---------------------------------------------------------------
+COMMUNITY_ALL_BUTTON = "🌍 Все площадки"
+COMMUNITIES_EMPTY = (
+    "🏢 Площадок пока нет — бот работает как одна площадка (твой колледж).\n"
+    "Когда появится вторая, здесь можно будет переключаться."
+)
+COMMUNITIES_HEADER = "🏢 <b>Площадки</b>\n\nСейчас ты видишь: <b>{current}</b>\n\nВыбери площадку:"
+COMMUNITY_SWITCHED = (
+    "✅ Переключено на «<b>{title}</b>».\n\n"
+    "Теперь в каталоге только объявления этой площадки."
+)
+COMMUNITY_SWITCHED_ALL = "🌍 Включён общий вид: показываю объявления всех площадок."
+COMMUNITY_JOINED = (
+    "✅ Ты на площадке «<b>{title}</b>». Каталог теперь показывает объявления только этой площадки."
+)
+COMMUNITY_NOT_FOUND = "Не нашёл площадку по этой ссылке. Возможно, код устарел — уточни у админа."
+COMMUNITY_INACTIVE = "Эта площадка сейчас отключена."
+COMMUNITY_OTHER = "Это объявление с другой площадки — открой каталог своей."
+COMMUNITY_ON = "включена"
+COMMUNITY_OFF = "выключена"
+
+ADMIN_COMMUNITIES_EMPTY = (
+    "🏫 <b>Площадки</b>\n\nПока ни одной: всё работает как одна площадка.\n"
+    "Создай вторую кнопкой ниже — тогда появятся инвайт-ссылки."
+)
+ADMIN_COMMUNITIES_HEADER = (
+    "🏫 <b>Площадки</b>\n\n{body}\n\nНажми на площадку, чтобы включить или выключить её."
+)
+ADMIN_COMMUNITY_ASK_CODE = (
+    "Код новой площадки: латиница, цифры и дефис, 3–32 символа. "
+    "Например: college-01 или obshaga-12. Пришли одним сообщением."
+)
+ADMIN_COMMUNITY_ASK_TITLE = "Название площадки, как её увидят студенты:"
+ADMIN_COMMUNITY_ASK_CITY = "Город площадки:"
+ADMIN_COMMUNITY_CREATED = (
+    "✅ Площадка «<b>{title}</b>» создана.\n\n"
+    "Инвайт-ссылка для студентов:\n{link}\n\n"
+    "Отправь её в чат площадки — кто по ней зайдёт, сразу попадёт на неё."
+)
+ADMIN_COMMUNITY_TOGGLED = "Площадка «{title}»: {state}."
+
+
+def community_label(row: Any) -> str:
+    """«Колледж №12 (Бишкек)» — или только название, если город пуст."""
+    title = escape(row["title"])
+    city = (row["city"] or "").strip()
+    return f"{title} ({escape(city)})" if city else title
+
+
+def community_state(row: Any) -> str:
+    return COMMUNITY_ON if row["is_active"] else COMMUNITY_OFF

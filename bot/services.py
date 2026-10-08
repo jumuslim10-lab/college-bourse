@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,43 @@ from bot.validation import find_bad_word, validate_description, validate_title
 MAX_ACTIVE_PER_USER = 3
 RATE_LIMIT_SECONDS = 30
 BUMP_HOURS = 24
+
+# Код площадки: латиница/цифры/дефис, 3–32 символа, без дефиса на концах.
+COMMUNITY_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$")
+COMMUNITY_CODE_MIN, COMMUNITY_CODE_MAX = 3, 32
+
+
+def normalize_community_code(raw: str) -> str:
+    return "-".join((raw or "").strip().lower().split())
+
+
+def is_valid_community_code(code: str) -> bool:
+    return (
+        COMMUNITY_CODE_MIN <= len(code) <= COMMUNITY_CODE_MAX
+        and COMMUNITY_CODE_RE.match(code) is not None
+    )
+
+
+def parse_start_payload(raw: str | None) -> str | None:
+    """Код площадки из deep-link «/start college-01» (или /start@bot college-01)."""
+    if not raw:
+        return None
+    parts = raw.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    payload = parts[1].strip().lower()
+    return payload or None
+
+
+def can_view_community(user_community: int | None, listing_community: int | None) -> bool:
+    """Правило видимости: «общий вид» (площадка не выбрана) видит всё; площадка — только своё.
+
+    Объявления без площадки (созданные до мультиплощадочности) остаются в общем пуле.
+    Первая созданная площадка забирает этот пул себе — см. create_community.
+    """
+    if user_community is None:
+        return True
+    return user_community == listing_community
 
 
 @dataclass
@@ -31,8 +69,10 @@ def visible_categories(counts: dict[str, int], bootstrap: bool) -> list[tuple[Ca
     return result
 
 
-async def category_menu(db: Database, bootstrap: bool) -> list[tuple[Category, int]]:
-    return visible_categories(await db.category_counts(), bootstrap)
+async def category_menu(
+    db: Database, bootstrap: bool, community_id: int | None = None
+) -> list[tuple[Category, int]]:
+    return visible_categories(await db.category_counts(community_id), bootstrap)
 
 
 async def submit_listing(
@@ -78,6 +118,7 @@ async def submit_listing(
     if bad_word:
         listing_id = await db.create_listing(
             author_id=user["id"],
+            community_id=user["community_id"],
             kind=kind,
             category_code=category_code,
             title=normalized_title,
@@ -96,6 +137,7 @@ async def submit_listing(
 
     listing_id = await db.create_listing(
         author_id=user["id"],
+        community_id=user["community_id"],
         kind=kind,
         category_code=category_code,
         title=normalized_title,
@@ -143,13 +185,13 @@ async def grant_bump(
     await db.log_event("bump_granted", listing_id=listing_id, user_id=admin_tg_id)
 
 
-async def build_digest(db: Database, limit: int = 5) -> str | None:
-    counts = await db.category_counts()
+async def build_digest(db: Database, limit: int = 5, community_id: int | None = None) -> str | None:
+    counts = await db.category_counts(community_id)
     lines: list[str] = []
     for category, count in visible_categories(counts, bootstrap=True):
         if not count:
             continue
-        listings = await db.list_active(category.code, limit=limit)
+        listings = await db.list_active(category.code, limit=limit, community_id=community_id)
         if not listings:
             continue
         lines.append(f"{category.emoji} <b>{category.title}</b>")
@@ -158,3 +200,51 @@ async def build_digest(db: Database, limit: int = 5) -> str | None:
     if not lines:
         return None
     return "☀️ <b>Сегодня на бирже</b>\n\n" + "\n".join(lines).strip()
+
+
+# --- площадки ---------------------------------------------------------------
+async def create_community(
+    db: Database, *, code: str, title: str, city: str
+) -> tuple[int | None, str | None]:
+    """Создаёт площадку. Возвращает (id, текст ошибки)."""
+    normalized = normalize_community_code(code)
+    if not is_valid_community_code(normalized):
+        return None, (
+            "Код не подошёл: латиница, цифры и дефис, 3–32 символа, "
+            "без дефиса на концах. Например: college-01."
+        )
+    clean_title = " ".join((title or "").split())[:80]
+    clean_city = " ".join((city or "").split())[:60]
+    if len(clean_title) < 3:
+        return None, "Название слишком короткое — напиши, как площадку увидят студенты."
+    if not clean_city:
+        return None, "Укажи город — он виден студентам в списке площадок."
+    if await db.get_community_by_code(normalized) is not None:
+        return None, "Площадка с таким кодом уже есть — придумай другой."
+    is_first = not await db.list_communities_with_counts()
+    community_id = await db.create_community(normalized, clean_title, clean_city)
+    if is_first:
+        # Первая площадка забирает общий пул: иначе после её появления у студентов
+        # «пропали» бы все старые объявления и они бы не нашли свою витрину.
+        await db.adopt_unassigned(community_id)
+    return community_id, None
+
+
+async def join_community(db: Database, user: Any, code: str) -> tuple[Any | None, str | None]:
+    """Привязывает пользователя к площадке по коду из инвайт-ссылки."""
+    normalized = normalize_community_code(code)
+    if not normalized:
+        return None, texts.COMMUNITY_NOT_FOUND
+    community = await db.get_community_by_code(normalized)
+    if community is None:
+        return None, texts.COMMUNITY_NOT_FOUND
+    if not community["is_active"]:
+        return None, texts.COMMUNITY_INACTIVE
+    await db.set_user_community(user["id"], community["id"])
+    await db.log_event("community_joined", user_id=user["id"], meta=normalized)
+    return community, None
+
+
+async def needs_community_switch(db: Database) -> bool:
+    """Кнопка «Площадки» нужна только когда площадок реально больше одной."""
+    return len(await db.list_active_communities()) > 1

@@ -27,14 +27,18 @@ async def _safe_edit(callback: CallbackQuery, text: str, markup=None) -> None:
         await callback.message.answer(text, reply_markup=markup)
 
 
-async def _render_category(callback: CallbackQuery, db: Database, code: str, page: int) -> None:
+async def _render_category(
+    callback: CallbackQuery, db: Database, code: str, page: int, community_id: int | None
+) -> None:
     category = get_category(code)
     if category is None:
         await callback.answer("Раздел не найден", show_alert=True)
         return
     page = max(0, page)
-    total = await db.count_active(code)
-    listings = await db.list_active(code, CATALOG_PAGE_SIZE, page * CATALOG_PAGE_SIZE)
+    total = await db.count_active(code, community_id)
+    listings = await db.list_active(
+        code, CATALOG_PAGE_SIZE, page * CATALOG_PAGE_SIZE, community_id
+    )
     if not listings:
         text = (
             f"{category.emoji} <b>{category.title}</b>\n\n"
@@ -54,8 +58,10 @@ async def catalog_root(message: Message, user, db: Database, config: Config) -> 
     if not user["agreed_at"]:
         await message.answer("Сначала прими правила: /start")
         return
-    visible = await services.category_menu(db, config.bootstrap_categories)
-    total = await db.count_all_active()
+    visible = await services.category_menu(
+        db, config.bootstrap_categories, user["community_id"]
+    )
+    total = await db.count_all_active(user["community_id"])
     await message.answer(
         f"🛒 В каталоге {total} активных объявлений.\nВыбери раздел:",
         reply_markup=keyboards.categories_kb(visible),
@@ -63,9 +69,11 @@ async def catalog_root(message: Message, user, db: Database, config: Config) -> 
 
 
 @router.callback_query(F.data == "catmenu")
-async def back_to_categories(callback: CallbackQuery, db: Database, config: Config) -> None:
-    visible = await services.category_menu(db, config.bootstrap_categories)
-    total = await db.count_all_active()
+async def back_to_categories(callback: CallbackQuery, db: Database, config: Config, user) -> None:
+    visible = await services.category_menu(
+        db, config.bootstrap_categories, user["community_id"]
+    )
+    total = await db.count_all_active(user["community_id"])
     await _safe_edit(
         callback,
         f"🛒 В каталоге {total} активных объявлений.\nВыбери раздел:",
@@ -75,16 +83,16 @@ async def back_to_categories(callback: CallbackQuery, db: Database, config: Conf
 
 
 @router.callback_query(F.data.startswith("cat:"))
-async def open_category(callback: CallbackQuery, db: Database) -> None:
+async def open_category(callback: CallbackQuery, db: Database, user) -> None:
     code = callback.data.split(":")[1]
-    await _render_category(callback, db, code, 0)
+    await _render_category(callback, db, code, 0, user["community_id"])
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("page:"))
-async def open_page(callback: CallbackQuery, db: Database) -> None:
+async def open_page(callback: CallbackQuery, db: Database, user) -> None:
     _, code, page = callback.data.split(":")
-    await _render_category(callback, db, code, int(page))
+    await _render_category(callback, db, code, int(page), user["community_id"])
     await callback.answer()
 
 
@@ -98,6 +106,9 @@ async def open_card(callback: CallbackQuery, db: Database, user) -> None:
     listing = await db.get_listing(listing_id)
     if listing is None or listing["status"] not in {"active", "pending"}:
         await callback.answer("Объявление больше недоступно", show_alert=True)
+        return
+    if not services.can_view_community(user["community_id"], listing["community_id"]):
+        await callback.answer(texts.COMMUNITY_OTHER, show_alert=True)
         return
 
     card = texts.format_listing_card(listing)
@@ -120,6 +131,9 @@ async def show_contact(callback: CallbackQuery, db: Database, user) -> None:
     listing = await db.get_listing(listing_id)
     if listing is None or listing["status"] != "active":
         await callback.answer("Объявление уже неактуально", show_alert=True)
+        return
+    if not services.can_view_community(user["community_id"], listing["community_id"]):
+        await callback.answer(texts.COMMUNITY_OTHER, show_alert=True)
         return
     await db.log_event("contact_shown", user_id=user["id"], listing_id=listing_id)
     handle = (
@@ -145,13 +159,13 @@ async def ask_query(message: Message, state: FSMContext, user) -> None:
 
 
 @router.message(Search.query, F.text)
-async def run_search(message: Message, state: FSMContext, db: Database) -> None:
+async def run_search(message: Message, state: FSMContext, db: Database, user) -> None:
     await state.clear()
     query = " ".join(message.text.split())
     if len(query) < 2:
         await message.answer("Слишком короткий запрос. Напиши хотя бы 2 символа.")
         return
-    rows = await db.search_active(query, 10)
+    rows = await db.search_active(query, 10, user["community_id"])
     if not rows:
         await message.answer(f"Ничего не нашлось по «{texts.escape(query)}».")
         return
