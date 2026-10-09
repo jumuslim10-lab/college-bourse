@@ -328,12 +328,19 @@ class Database:
         limit: int,
         offset: int = 0,
         community_id: int | None = None,
+        with_total: bool = False,
     ) -> list[Mapping[str, Any]]:
-        """community_id=None — показываем объявления всех площадок (режим одной площадки)."""
+        """Активные объявления раздела.
+
+        community_id=None — показываем объявления всех площадок (режим одной площадки).
+        with_total=True добавляет в каждую строку общее число объявлений (`total_count`):
+        так экран раздела укладывается в один запрос вместо двух, что важно при удалённой базе.
+        """
         clause, clause_params = community_clause(community_id, "l.community_id")
+        extra = ",\n                     COUNT(*) OVER () AS total_count" if with_total else ""
         return await self._fetchall(
             f"""
-            SELECT {CARD_COLUMNS}
+            SELECT {CARD_COLUMNS.strip()}{extra}
             FROM listings l JOIN users u ON u.id = l.author_id
             WHERE l.status = 'active' AND l.category_code = ?{clause}
             ORDER BY CASE WHEN l.bumped_until IS NOT NULL AND l.bumped_until > ? THEN 1 ELSE 0 END DESC,

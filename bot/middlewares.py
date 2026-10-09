@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from aiogram import BaseMiddleware
@@ -16,10 +16,31 @@ logger = logging.getLogger(__name__)
 
 
 class UserMiddleware(BaseMiddleware):
-    """Пишет пользователя в БД и не пускает забаненных дальше."""
+    """Пишет пользователя в БД и не пускает забаненных дальше.
 
-    def __init__(self, db: Database) -> None:
+    Строка пользователя кешируется на `cache_seconds`. При облачной базе (~700 мс на запрос)
+    это убирает целый круг обращений на каждое нажатие кнопки: студент жмёт каталог → раздел →
+    карточку, и все эти шаги не ходят в базу за одним и тем же пользователем.
+    Плата: бан и правки профиля применяются с задержкой до минуты.
+    """
+
+    def __init__(self, db: Database, cache_seconds: float = 60.0) -> None:
         self.db = db
+        self.cache_seconds = cache_seconds
+        self._cache: dict[int, tuple[float, Mapping[str, Any]]] = {}
+        self._cache_limit = 5000
+
+    async def _user(self, from_user: Any) -> Mapping[str, Any]:
+        now_ts = time.monotonic()
+        cached = self._cache.get(from_user.id)
+        if cached is not None and now_ts - cached[0] < self.cache_seconds:
+            return cached[1]
+
+        user = await self.db.upsert_user(from_user.id, from_user.username, from_user.first_name)
+        if len(self._cache) > self._cache_limit:
+            self._cache.clear()
+        self._cache[from_user.id] = (now_ts, user)
+        return user
 
     async def __call__(
         self,
@@ -31,7 +52,7 @@ class UserMiddleware(BaseMiddleware):
         if from_user is None:
             return await handler(event, data)
 
-        user = await self.db.upsert_user(from_user.id, from_user.username, from_user.first_name)
+        user = await self._user(from_user)
         data["user"] = user
         data["db"] = self.db
 

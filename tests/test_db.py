@@ -183,3 +183,26 @@ def test_reconnect_keeps_data_and_migration_is_idempotent(tmp_path):
             await again.close()
 
     run(scenario())
+
+
+def test_list_active_returns_total_in_one_query(tmp_path):
+    """with_total=True отдаёт общее число объявлений вместе со списком (один запрос)."""
+
+    async def scenario():
+        async with open_db(tmp_path) as db:
+            user = await make_user(db, 1)
+            for index in range(5):
+                await make_listing(db, user, title=f"Объявление {index}")
+
+            rows = await db.list_active("services", 2, 0, None, with_total=True)
+            assert len(rows) == 2
+            assert int(rows[0]["total_count"]) == 5
+
+            last_page = await db.list_active("services", 2, 4, None, with_total=True)
+            assert len(last_page) == 1
+            assert int(last_page[0]["total_count"]) == 5
+
+            empty = await db.list_active("food", 2, 0, None, with_total=True)
+            assert empty == []
+
+    run(scenario())

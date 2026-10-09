@@ -35,10 +35,15 @@ async def _render_category(
         await callback.answer("Раздел не найден", show_alert=True)
         return
     page = max(0, page)
-    total = await db.count_active(code, community_id)
+    # Один запрос вместо двух: общее число объявлений приходит вместе со списком.
     listings = await db.list_active(
-        code, CATALOG_PAGE_SIZE, page * CATALOG_PAGE_SIZE, community_id
+        code,
+        CATALOG_PAGE_SIZE,
+        page * CATALOG_PAGE_SIZE,
+        community_id,
+        with_total=True,
     )
+    total = int(listings[0]["total_count"]) if listings else 0
     if not listings:
         text = (
             f"{category.emoji} <b>{category.title}</b>\n\n"
