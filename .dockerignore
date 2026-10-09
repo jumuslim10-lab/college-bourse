@@ -1,0 +1,20 @@
+# В образ не попадает ничего лишнего — и главное, сюда не попадают секреты.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+data
+logs
+tests
+docs
+deploy
+.env
+.env.example
+README.md
+PROMPT.md
+CLAUDE.md
+start-bot.cmd

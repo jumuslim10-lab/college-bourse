@@ -29,6 +29,32 @@ COMMANDS = [
 ]
 
 
+async def health_server(port: int) -> None:
+    """Крошечный HTTP-ответ «ok» для платформ вроде Railway, которые ждут порт.
+
+    Бот работает на long polling, публичный порт ему не нужен — но PaaS-платформа
+    по наличию слушающего порта понимает, что сервис жив.
+    """
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            # читаем ровно заголовки: read(n) ждал бы ровно n байт и повесил ответ
+            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        except (TimeoutError, asyncio.IncompleteReadError, OSError):
+            # некоторые платформы просто открывают соединение и молчат — это нормально
+            logger.debug("Healthcheck: клиент не прислал заголовки")
+        try:
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    logger.info("Health-ответ слушает порт %s", port)
+    async with server:
+        await server.serve_forever()
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -71,12 +97,15 @@ async def main() -> None:
         ) from None
 
     background = asyncio.create_task(scheduler_loop(bot, db, config))
+    health = asyncio.create_task(health_server(config.health_port)) if config.health_port else None
 
     logger.info("Бот запущен. База: %s. Админы: %s", db.describe(), config.admin_ids or "не заданы")
     try:
         await dp.start_polling(bot, config=config)
     finally:
         background.cancel()
+        if health is not None:
+            health.cancel()
         await db.close()
         await bot.session.close()
 

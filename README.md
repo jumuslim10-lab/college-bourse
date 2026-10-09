@@ -57,8 +57,11 @@ Copy-Item .env.example .env
 ```
 
 Бот работает в режиме long polling: вебхук и домен не нужны. Пока тестируешь — держи
-`run.py` запущенным локально; когда бот понадобится 24/7, перенеси папку на дешёвый VPS
-и заведи systemd-юнит (`ExecStart=/opt/college-bourse/.venv/bin/python /opt/college-bourse/run.py`).
+`run.py` запущенным локально. Для работы 24/7 есть два пути:
+
+- **Railway** (проще, без сервера): деплой прямо из GitHub, переменные и логи в интерфейсе —
+  [deploy/RAILWAY.md](deploy/RAILWAY.md); важное условие — регион **Singapore**, рядом с базой;
+- **VPS** (полный контроль): [deploy/README.md](deploy/README.md) — systemd-юнит и скрипт установки.
 
 ## База данных: SQLite или Supabase
 

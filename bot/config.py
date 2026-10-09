@@ -38,6 +38,7 @@ class Config:
     bootstrap_categories: bool
     db_backend: str = "sqlite"
     database_url: str = ""
+    health_port: int = 0
 
 
 def load_config() -> Config:
@@ -46,6 +47,9 @@ def load_config() -> Config:
     backend = os.getenv("DB_BACKEND", "").strip().lower() or "sqlite"
     if backend not in {"sqlite", "postgres"}:
         raise SystemExit(f"DB_BACKEND={backend!r} не поддерживается. Разрешено: sqlite или postgres.")
+    # На Railway/PaaS переменная PORT приходит сама — тогда поднимаем health-ответ,
+    # чтобы платформа видела живость сервиса.
+    port_raw = os.getenv("HEALTH_PORT", "").strip() or os.getenv("PORT", "").strip()
     return Config(
         bot_token=os.getenv("BOT_TOKEN", "").strip(),
         admin_ids=parse_admin_ids(os.getenv("ADMIN_IDS", "")),
@@ -54,4 +58,5 @@ def load_config() -> Config:
         bootstrap_categories=parse_bool(os.getenv("BOOTSTRAP_CATEGORIES", "")),
         db_backend=backend,
         database_url=os.getenv("DATABASE_URL", "").strip(),
+        health_port=int(port_raw) if port_raw.isdigit() else 0,
     )
